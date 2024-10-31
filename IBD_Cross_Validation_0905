@@ -1,0 +1,1026 @@
+---
+title: "IBD_Cross_Validation_0905"
+author: "Sherry"
+date: "2024-09-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(randomForest)
+library(caret)
+library(DESeq2)
+library(ggplot2)
+```
+
+### Import the dataset
+
+```{r import}
+cnt <- read.delim("/Users/sherrywang/Desktop/Research/Furey/AnalysisTable/RUVg_k10_normalized_counts.tsv", header=T, check.names = FALSE)
+head(cnt)
+met <- read.delim("/Users/sherrywang/Desktop/Research/Furey/AnalysisTable/plexus_atac_metadata_03112024.tsv", header=T)
+head(met)
+```
+
+### Reshape the dataset
+
+```{r clean}
+mdata <- met %>%
+  select(DEIDENTIFIED_MASTER_PATIENT_ID, Group) %>%
+  mutate(DID = as.factor(DEIDENTIFIED_MASTER_PATIENT_ID)) %>%  # Convert to factor
+  select(-DEIDENTIFIED_MASTER_PATIENT_ID)  # Remove the old column if no longer needed
+
+head(mdata)
+
+rownames(cnt) <- cnt[, 1]
+cdata <- cnt[, -1]
+
+head(cdata)
+
+cnt_DID_COUNT <- data.frame(t(cdata))
+cnt_DID_COUNT
+
+
+# Optionally, remove the first row if it was used as column names
+cnt_DID_COUNT$DID <- rownames(cnt_DID_COUNT)
+
+# Join and reorder the dataset
+# complete <- left_join(cnt_DID_COUNT, mdata, by = "DID")
+# complete <- complete[, c(ncol(complete), 1:(ncol(complete)-1))]
+# complete <- complete[, c(ncol(complete), 1:(ncol(complete)-1))]
+
+# head(complete)
+
+```
+
+### Randomized group
+```{r random}
+set.seed(456)  # For reproducibility
+
+# Total number of individuals
+n <- nrow(met)
+
+# Generate fold indices
+folds <- cut(sample(1:n), breaks = 5, labels = FALSE)
+
+# View the folds
+folds
+
+# Add the folds to the complete dataset
+# complete$folds <- folds
+
+# Add the folds to metadata and count data
+mdata$folds <- folds
+head(mdata)
+
+```
+### Loop for cross-validation
+
+```{r loop}
+# head(complete)
+head(mdata)
+head(cdata)
+```
+
+
+
+```{r loop}
+results <- list()
+
+# Perform 5-fold cross-validation
+for (i in 1:5) {
+  test_index <- which(folds == i, arr.ind = TRUE)  # Get the indices for the test set
+  train_mdata <- mdata[-test_index, ]  # Training set: all rows except the test set
+  test_mdata  <- mdata[test_index, ] # Test set: only rows in the current fold
+  
+  head(train_mdata)
+    
+  cdata_DID <- colnames(cdata)
+
+  # Find the columns in second dataset that match values in DID column from the first dataset
+  match <- cdata_DID[cdata_DID %in% train_mdata$DID]
+
+  # View matching columns
+  train_cdata <- cdata %>%
+    select(match)
+  
+  test_cdata <- cdata %>%
+    select(-match)
+
+  # DESeq2
+  dds <- DESeqDataSetFromMatrix(countData = train_cdata,
+                              colData = train_mdata,
+                              design = ~ Group)
+  dds <- DESeq(dds)
+  
+  # View result
+  res <- results(dds)
+  data.frame(res)
+  
+  # Extract the top 1000 features
+  # Subset the dataframe to include only rows where baseMean >= 100
+res_filtered <- res[res$baseMean >= 100, ]
+
+# Check if the filtered dataframe is not empty
+  if (nrow(res_filtered) > 0) {
+    # Extract padj and calculate rank
+    padj <- res_filtered[, 6]
+    rankpadj <- rank(-padj, na.last = "keep", ties.method = "average")
+    
+    # Add RankPAdj to the dataframe
+    res_filtered$RankPAdj <- rankpadj
+    
+    # Order by RankPAdj and select top 1000 features
+    orderP <- res_filtered[order(-res_filtered$RankPAdj), ]
+    fea_select <- head(orderP, 1000)
+  } else {
+    # Handle case where no rows meet the condition
+    fea_select <- NULL
+    message("No rows with baseMean >= 100")
+  }
+  
+  fea <- data.frame(rownames(fea_select))
+  colnames(fea) <- "Feature"
+  
+  # Reshape Train Set
+  train_cdata$Feature <- rownames(train_cdata)
+  fea_cnt_train <- left_join(fea, train_cdata, by = "Feature")
+  train_ana <- data.frame(t(fea_cnt_train))
+  colnames(train_ana) <- train_ana[1,]
+  train_ana <- train_ana[-1,]
+  train_ana$DID <- rownames(train_ana)
+  train_ana <- train_ana[, c(ncol(train_ana), 1:(ncol(train_ana)-1))]
+  train_ana <- left_join(train_ana, mdata, by = "DID")
+  train_ana <- train_ana[, c(ncol(train_ana), 1:(ncol(train_ana)-1))]
+  train_ana <- train_ana[, -2]
+  cols_train <- setdiff(names(train_ana), "Group")
+  train_ana[cols_train] <- lapply(train_ana[cols_train], function(x) {
+    if (is.factor(x)) {
+      x <- as.character(x)
+    }
+    as.numeric(x)
+  })
+
+
+  # Reshape Test Set
+  test_cdata$Feature <- rownames(test_cdata)
+  fea_cnt_test <- left_join(fea, test_cdata, by = "Feature")
+  test_ana <- data.frame(t(fea_cnt_test))
+  colnames(test_ana) <- test_ana[1,]
+  test_ana <- test_ana[-1,]
+  test_ana$DID <- rownames(test_ana)
+  test_ana <- test_ana[, c(ncol(test_ana), 1:(ncol(test_ana)-1))]
+  test_ana <- left_join(test_ana, mdata, by = "DID")
+  test_ana <- test_ana[, c(ncol(test_ana), 1:(ncol(test_ana)-1))]
+  test_ana <- test_ana[, -2]
+  cols_test <- setdiff(names(test_ana), "Group")
+  test_ana[cols_test] <- lapply(test_ana[cols_test], function(x) {
+    if (is.factor(x)) {
+      x <- as.character(x)
+    }
+    as.numeric(x)
+  })
+
+  # Run RF model
+  rf_model <- randomForest(as.factor(Group) ~ ., data = train_ana, importance = TRUE)
+  predictions <- predict(rf_model, newdata = test_ana)
+  
+  # Print the model summary
+  print(rf_model)
+  
+    # Evaluate the accuracy
+  confusion_matrix <- table(predictions, test_ana$Group)
+  accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+  print(paste("Accuracy:", round(accuracy * 100, 2), "%"))
+  
+  # Get variable importance
+  importance_df <- importance(rf_model)
+  
+  # Sort variables by importance
+  sorted_importance <- importance_df[order(-importance_df[, "MeanDecreaseGini"]), ]
+  sorted_accuracy <- importance_df[order(-importance_df[, "MeanDecreaseAccuracy"]), ]
+  
+  # Plot variable importance (high to low)
+  varImpPlot(rf_model, 
+             sort = TRUE, 
+             n.var = min(500, nrow(sorted_importance)),
+             main = paste("Random Forest Variable Importance (Fold", i, ")"))
+  
+  # Print the sorted importance
+  # print(sorted_importance)
+  
+  # Select the top variables
+  data.frame(sorted_accuracy)
+  top_vars <- head(rownames(sorted_accuracy), 20)
+  results[[i]] <- top_vars
+}
+
+```
+
+Mean Decrease in Accuracy (Left Plot): \
+This plot shows how much the accuracy of the model decreases when a particular variable is excluded. Higher values indicate that the variable is more important for making accurate predictions.
+
+Mean Decrease in Gini (Right Plot): \
+This plot measures the total decrease in node impurity (Gini impurity) that a variable contributes to. Higher values mean the variable plays a significant role in splitting the data into homogenous groups.
+
+```{r}
+results
+```
+
+
+### Appendix (loop breakdown 1)
+
+```{r looptest}
+test_index <- which(folds == 1, arr.ind = TRUE)  # Get the indices for the test set
+  train_mdata <- mdata[-test_index, ]  # Training set: all rows except the test set
+  test_mdata  <- mdata[test_index, ] # Test set: only rows in the current fold
+  
+  head(train_mdata)
+    
+  cdata_DID <- colnames(cdata)
+
+  # Find the columns in second dataset that match values in DID column from the first dataset
+  match <- cdata_DID[cdata_DID %in% train_mdata$DID]
+
+  # View matching columns
+  train_cdata <- cdata %>%
+    select(match)
+  
+  test_cdata <- cdata %>%
+    select(-match)
+  
+  train_mdata
+  train_cdata
+
+  # DESeq2
+  dds <- DESeqDataSetFromMatrix(countData = train_cdata,
+                              colData = train_mdata,
+                              design = ~ Group)
+  dds <- DESeq(dds)
+  
+  # View result
+  res <- results(dds)
+  data.frame(res)
+  
+  # Extract the top 1000 features
+  # Subset the dataframe to include only rows where baseMean >= 100
+res_filtered <- res[res$baseMean >= 100, ]
+
+# Check if the filtered dataframe is not empty
+  if (nrow(res_filtered) > 0) {
+    # Extract padj and calculate rank
+    padj <- res_filtered[, 6]
+    rankpadj <- rank(-padj, na.last = "keep", ties.method = "average")
+    
+    # Add RankPAdj to the dataframe
+    res_filtered$RankPAdj <- rankpadj
+    
+    # Order by RankPAdj and select top 1000 features
+    orderP <- res_filtered[order(-res_filtered$RankPAdj), ]
+    fea_select <- head(orderP, 500)
+  } else {
+    # Handle case where no rows meet the condition
+    fea_select <- NULL
+    message("No rows with baseMean >= 100")
+  }
+  
+  fea <- data.frame(rownames(fea_select))
+  colnames(fea) <- "Feature"
+  
+  # Reshape Train Set
+  train_cdata$Feature <- rownames(train_cdata)
+  fea_cnt_train <- left_join(fea, train_cdata, by = "Feature")
+  train_ana <- data.frame(t(fea_cnt_train))
+  colnames(train_ana) <- train_ana[1,]
+  train_ana <- train_ana[-1,]
+  train_ana$DID <- rownames(train_ana)
+  train_ana <- train_ana[, c(ncol(train_ana), 1:(ncol(train_ana)-1))]
+  train_ana <- left_join(train_ana, mdata, by = "DID")
+  train_ana <- train_ana[, c(ncol(train_ana), 1:(ncol(train_ana)-1))]
+  train_ana <- train_ana[, -2]
+  cols_train <- setdiff(names(train_ana), "Group")
+  train_ana[cols_train] <- lapply(train_ana[cols_train], function(x) {
+    if (is.factor(x)) {
+      x <- as.character(x)
+    }
+    as.numeric(x)
+  })
+
+
+  # Reshape Test Set
+  test_cdata$Feature <- rownames(test_cdata)
+  fea_cnt_test <- left_join(fea, test_cdata, by = "Feature")
+  test_ana <- data.frame(t(fea_cnt_test))
+  colnames(test_ana) <- test_ana[1,]
+  test_ana <- test_ana[-1,]
+  test_ana$DID <- rownames(test_ana)
+  test_ana <- test_ana[, c(ncol(test_ana), 1:(ncol(test_ana)-1))]
+  test_ana <- left_join(test_ana, mdata, by = "DID")
+  test_ana <- test_ana[, c(ncol(test_ana), 1:(ncol(test_ana)-1))]
+  test_ana <- test_ana[, -2]
+  cols_test <- setdiff(names(test_ana), "Group")
+  test_ana[cols_test] <- lapply(test_ana[cols_test], function(x) {
+    if (is.factor(x)) {
+      x <- as.character(x)
+    }
+    as.numeric(x)
+  })
+
+  # Run RF model
+  rf_1 <- randomForest(as.factor(Group) ~ ., data = train_ana, importance = TRUE)
+  predictions_1 <- predict(rf_1, newdata = test_ana)
+  predictions_train_1 <- predict(rf_1, newdata = train_ana)
+  
+  
+  missclassified <- test_mdata[test_ana$Group != predictions_1, ]
+  missclassified
+  
+  # Print the model summary
+  print(rf_1)
+```
+
+
+```{r looptest}
+# Evaluate the accuracy
+  
+  # Test Dataset
+  confusion_matrix_1 <- table(predictions_1, test_ana$Group)
+confusion_matrix_1
+  
+  # Train Dataset
+  confusion_matrix_train_1 <- table(predictions_train_1, train_ana$Group)
+confusion_matrix_train_1
+  
+  # Print Test Dataset Accuracy
+  accuracy_1 <- sum(diag(confusion_matrix_1)) / sum(confusion_matrix_1)
+  print(paste("Accuracy with test dataset:", round(accuracy_1 * 100, 2), "%"))
+  
+  # Print Train Dataset Accuracy
+  accuracy_train_1 <- sum(diag(confusion_matrix_train_1)) / sum(confusion_matrix_train_1)
+  print(paste("Accuracy with train dataset:", round(accuracy_train_1 * 100, 2), "%"))
+  
+  # Get variable importance
+  importance_df_1 <- data.frame(importance(rf_1))
+  importance_df_1$RankAccuracy <- rank(importance_df_1$MeanDecreaseAccuracy, na.last = F, ties.method = "average")
+  importance_df_1$RankGini <- rank(importance_df_1$MeanDecreaseGini, na.last = F, ties.method = "average")
+  importance_df_1$Score <- importance_df_1$RankAccuracy + importance_df_1$RankGini
+  importance_df_1 <- importance_df_1[order(-importance_df_1[, "Score"]), ]
+  importance_df_1
+  plot(importance_df_1$Score)
+  
+  # Sort variables by importance
+  sorted_accuracy_1 <- importance_df_1[order(-importance_df_1[, "MeanDecreaseAccuracy"]), ]
+  sorted_Gini_1 <- importance_df_1[order(-importance_df_1[, "MeanDecreaseGini"]), ]
+  
+  # Plot variable importance (high to low)
+  varImpPlot(rf_1, 
+             sort = TRUE, 
+             n.var = min(100, nrow(sorted_accuracy_1)),
+             main = "RF Model for Fold 1")
+  
+  # Sorted by decreasing Accuracy
+  sorted_accuracy_1 <- data.frame(sorted_accuracy_1)
+  sorted_Gini_1 <- data.frame(sorted_Gini_1)
+  sorted_accuracy_1
+  sorted_Gini_1
+  
+```
+```{r}
+sorted_accuracy_1
+# Select the top variables (e.g., top 5)
+top_vars_1 <- head(rownames(sorted_accuracy_1), 147)
+print("Top Variables to Retain:")
+print(top_vars_1)
+```
+
+
+ntree (number of trees):
+
+The default number of trees is 500. This means the random forest will grow 500 trees unless you specify a different value.
+mtry (number of variables randomly sampled at each split):
+
+The default value for mtry depends on the type of task:
+For classification tasks: mtry = sqrt(p), where p is the number of predictors (features) in the dataset.
+For regression tasks: mtry = p/3, where p is the number of predictors (features).
+
+If your goal is better overall prediction accuracy, focus on Mean Decrease Accuracy.
+If you are more concerned with understanding variable interactions or structure in your data, the Mean Decrease Gini may be more helpful.
+
+### Appendix (loop breakdown 2)
+
+```{r looptest}
+test_index <- which(folds == 2, arr.ind = TRUE)  # Get the indices for the test set
+  train_mdata <- mdata[-test_index, ]  # Training set: all rows except the test set
+  test_mdata  <- mdata[test_index, ] # Test set: only rows in the current fold
+  
+  head(train_mdata)
+    
+  cdata_DID <- colnames(cdata)
+
+  # Find the columns in second dataset that match values in DID column from the first dataset
+  match <- cdata_DID[cdata_DID %in% train_mdata$DID]
+
+  # View matching columns
+  train_cdata <- cdata %>%
+    select(match)
+  
+  test_cdata <- cdata %>%
+    select(-match)
+
+  # DESeq2
+  dds <- DESeqDataSetFromMatrix(countData = train_cdata,
+                              colData = train_mdata,
+                              design = ~ Group)
+  dds <- DESeq(dds)
+  
+  # View result
+  res <- results(dds)
+  data.frame(res)
+  
+  # Extract the top 1000 features
+  # Subset the dataframe to include only rows where baseMean >= 100
+res_filtered <- res[res$baseMean >= 100, ]
+
+# Check if the filtered dataframe is not empty
+  if (nrow(res_filtered) > 0) {
+    # Extract padj and calculate rank
+    padj <- res_filtered[, 6]
+    rankpadj <- rank(-padj, na.last = "keep", ties.method = "average")
+    
+    # Add RankPAdj to the dataframe
+    res_filtered$RankPAdj <- rankpadj
+    
+    # Order by RankPAdj and select top 1000 features
+    orderP <- res_filtered[order(-res_filtered$RankPAdj), ]
+    fea_select <- head(orderP, 1000)
+  } else {
+    # Handle case where no rows meet the condition
+    fea_select <- NULL
+    message("No rows with baseMean >= 100")
+  }
+  
+  fea <- data.frame(rownames(fea_select))
+  colnames(fea) <- "Feature"
+  
+  # Reshape Train Set
+  train_cdata$Feature <- rownames(train_cdata)
+  fea_cnt_train <- left_join(fea, train_cdata, by = "Feature")
+  train_ana <- data.frame(t(fea_cnt_train))
+  colnames(train_ana) <- train_ana[1,]
+  train_ana <- train_ana[-1,]
+  train_ana$DID <- rownames(train_ana)
+  train_ana <- train_ana[, c(ncol(train_ana), 1:(ncol(train_ana)-1))]
+  train_ana <- left_join(train_ana, mdata, by = "DID")
+  train_ana <- train_ana[, c(ncol(train_ana), 1:(ncol(train_ana)-1))]
+  train_ana <- train_ana[, -2]
+  cols_train <- setdiff(names(train_ana), "Group")
+  train_ana[cols_train] <- lapply(train_ana[cols_train], function(x) {
+    if (is.factor(x)) {
+      x <- as.character(x)
+    }
+    as.numeric(x)
+  })
+
+
+  # Reshape Test Set
+  test_cdata$Feature <- rownames(test_cdata)
+  fea_cnt_test <- left_join(fea, test_cdata, by = "Feature")
+  test_ana <- data.frame(t(fea_cnt_test))
+  colnames(test_ana) <- test_ana[1,]
+  test_ana <- test_ana[-1,]
+  test_ana$DID <- rownames(test_ana)
+  test_ana <- test_ana[, c(ncol(test_ana), 1:(ncol(test_ana)-1))]
+  test_ana <- left_join(test_ana, mdata, by = "DID")
+  test_ana <- test_ana[, c(ncol(test_ana), 1:(ncol(test_ana)-1))]
+  test_ana <- test_ana[, -2]
+  cols_test <- setdiff(names(test_ana), "Group")
+  test_ana[cols_test] <- lapply(test_ana[cols_test], function(x) {
+    if (is.factor(x)) {
+      x <- as.character(x)
+    }
+    as.numeric(x)
+  })
+
+  # Run RF model
+  rf_2 <- randomForest(as.factor(Group) ~ ., data = train_ana, importance = TRUE)
+  predictions_2 <- predict(rf_2, newdata = test_ana)
+  predictions_train_2 <- predict(rf_2, newdata = train_ana)
+  
+  # Print the model summary
+  print(rf_2)
+```
+
+
+```{r looptest}
+# Evaluate the accuracy
+  
+  # Test Dataset
+  confusion_matrix_2 <- table(predictions_2, test_ana$Group)
+  
+  # Train Dataset
+  confusion_matrix_train_2 <- table(predictions_train_2, train_ana$Group)
+  
+  # Print Test Dataset Accuracy
+  accuracy_2 <- sum(diag(confusion_matrix_2)) / sum(confusion_matrix_2)
+  print(paste("Accuracy with test dataset:", round(accuracy_2 * 100, 2), "%"))
+  
+  # Print Train Dataset Accuracy
+  accuracy_train_2 <- sum(diag(confusion_matrix_train_2)) / sum(confusion_matrix_train_2)
+  print(paste("Accuracy with train dataset:", round(accuracy_train_2 * 100, 2), "%"))
+  
+  # Get variable importance
+  importance_df_2 <- importance(rf_2)
+  
+  # Sort variables by importance
+  sorted_accuracy_2 <- importance_df_2[order(-importance_df_2[, "MeanDecreaseAccuracy"]), ]
+  
+  # Plot variable importance (high to low)
+  varImpPlot(rf_2, 
+             sort = TRUE, 
+             n.var = min(200, nrow(sorted_accuracy_2)),
+             main = "RF Model for Fold 2")
+  
+  # Sorted by decreasing Accuracy
+  sorted_accuracy_2 <- data.frame(sorted_accuracy_2)
+  
+```
+
+```{r}
+sorted_accuracy_2
+# Select the top variables (e.g., top 5)
+top_vars_2 <- head(rownames(sorted_accuracy_2), 154)
+print("Top Variables to Retain:")
+print(top_vars_2)
+
+```
+
+
+### Appendix (loop breakdown 3)
+
+```{r looptest}
+test_index <- which(folds == 3, arr.ind = TRUE)  # Get the indices for the test set
+  train_mdata <- mdata[-test_index, ]  # Training set: all rows except the test set
+  test_mdata  <- mdata[test_index, ] # Test set: only rows in the current fold
+  
+  head(train_mdata)
+    
+  cdata_DID <- colnames(cdata)
+
+  # Find the columns in second dataset that match values in DID column from the first dataset
+  match <- cdata_DID[cdata_DID %in% train_mdata$DID]
+
+  # View matching columns
+  train_cdata <- cdata %>%
+    select(match)
+  
+  test_cdata <- cdata %>%
+    select(-match)
+
+  # DESeq2
+  dds <- DESeqDataSetFromMatrix(countData = train_cdata,
+                              colData = train_mdata,
+                              design = ~ Group)
+  dds <- DESeq(dds)
+  
+  # View result
+  res <- results(dds)
+  data.frame(res)
+  
+  # Extract the top 1000 features
+  # Subset the dataframe to include only rows where baseMean >= 100
+res_filtered <- res[res$baseMean >= 100, ]
+
+# Check if the filtered dataframe is not empty
+  if (nrow(res_filtered) > 0) {
+    # Extract padj and calculate rank
+    padj <- res_filtered[, 6]
+    rankpadj <- rank(-padj, na.last = "keep", ties.method = "average")
+    
+    # Add RankPAdj to the dataframe
+    res_filtered$RankPAdj <- rankpadj
+    
+    # Order by RankPAdj and select top 1000 features
+    orderP <- res_filtered[order(-res_filtered$RankPAdj), ]
+    fea_select <- head(orderP, 1000)
+  } else {
+    # Handle case where no rows meet the condition
+    fea_select <- NULL
+    message("No rows with baseMean >= 100")
+  }
+  
+  fea <- data.frame(rownames(fea_select))
+  colnames(fea) <- "Feature"
+  
+  # Reshape Train Set
+  train_cdata$Feature <- rownames(train_cdata)
+  fea_cnt_train <- left_join(fea, train_cdata, by = "Feature")
+  train_ana <- data.frame(t(fea_cnt_train))
+  colnames(train_ana) <- train_ana[1,]
+  train_ana <- train_ana[-1,]
+  train_ana$DID <- rownames(train_ana)
+  train_ana <- train_ana[, c(ncol(train_ana), 1:(ncol(train_ana)-1))]
+  train_ana <- left_join(train_ana, mdata, by = "DID")
+  train_ana <- train_ana[, c(ncol(train_ana), 1:(ncol(train_ana)-1))]
+  train_ana <- train_ana[, -2]
+  cols_train <- setdiff(names(train_ana), "Group")
+  train_ana[cols_train] <- lapply(train_ana[cols_train], function(x) {
+    if (is.factor(x)) {
+      x <- as.character(x)
+    }
+    as.numeric(x)
+  })
+
+
+  # Reshape Test Set
+  test_cdata$Feature <- rownames(test_cdata)
+  fea_cnt_test <- left_join(fea, test_cdata, by = "Feature")
+  test_ana <- data.frame(t(fea_cnt_test))
+  colnames(test_ana) <- test_ana[1,]
+  test_ana <- test_ana[-1,]
+  test_ana$DID <- rownames(test_ana)
+  test_ana <- test_ana[, c(ncol(test_ana), 1:(ncol(test_ana)-1))]
+  test_ana <- left_join(test_ana, mdata, by = "DID")
+  test_ana <- test_ana[, c(ncol(test_ana), 1:(ncol(test_ana)-1))]
+  test_ana <- test_ana[, -2]
+  cols_test <- setdiff(names(test_ana), "Group")
+  test_ana[cols_test] <- lapply(test_ana[cols_test], function(x) {
+    if (is.factor(x)) {
+      x <- as.character(x)
+    }
+    as.numeric(x)
+  })
+
+  # Run RF model
+  rf_3 <- randomForest(as.factor(Group) ~ ., data = train_ana, importance = TRUE)
+  predictions_3 <- predict(rf_3, newdata = test_ana)
+  predictions_train_3 <- predict(rf_3, newdata = train_ana)
+  
+  # Print the model summary
+  print(rf_3)
+```
+
+
+```{r looptest}
+# Evaluate the accuracy
+  
+  # Test Dataset
+  confusion_matrix_3 <- table(predictions_3, test_ana$Group)
+  
+  # Train Dataset
+  confusion_matrix_train_3 <- table(predictions_train_3, train_ana$Group)
+  
+  # Print Test Dataset Accuracy
+  accuracy_3 <- sum(diag(confusion_matrix_3)) / sum(confusion_matrix_3)
+  print(paste("Accuracy with test dataset:", round(accuracy_3 * 100, 2), "%"))
+  
+  # Print Train Dataset Accuracy
+  accuracy_train_3 <- sum(diag(confusion_matrix_train_3)) / sum(confusion_matrix_train_3)
+  print(paste("Accuracy with train dataset:", round(accuracy_train_3 * 100, 2), "%"))
+  
+  # Get variable importance
+  importance_df_3 <- importance(rf_3)
+  
+  # Sort variables by importance
+  sorted_accuracy_3 <- importance_df_3[order(-importance_df_3[, "MeanDecreaseAccuracy"]), ]
+  
+  # Select the top variables (e.g., top 5)
+  top_vars_3 <- head(rownames(sorted_accuracy_3), 147)
+  print("Top Variables to Retain:")
+  print(top_vars_3)
+  
+  # Plot variable importance (high to low)
+  varImpPlot(rf_3, 
+             sort = TRUE, 
+             n.var = min(200, nrow(sorted_accuracy_3)),
+             main = "RF Model for Fold 3")
+  
+  # Sorted by decreasing Accuracy
+  sorted_accuracy_3 <- data.frame(sorted_accuracy_3)
+  
+```
+```{r}
+sorted_accuracy_3
+# Select the top variables (e.g., top 5)
+top_vars_3 <- head(rownames(sorted_accuracy_3), 136)
+print("Top Variables to Retain:")
+print(top_vars_3)
+```
+
+### Appendix (loop breakdown 4)
+
+```{r looptest}
+test_index <- which(folds == 4, arr.ind = TRUE)  # Get the indices for the test set
+  train_mdata <- mdata[-test_index, ]  # Training set: all rows except the test set
+  test_mdata  <- mdata[test_index, ] # Test set: only rows in the current fold
+  
+  head(train_mdata)
+    
+  cdata_DID <- colnames(cdata)
+
+  # Find the columns in second dataset that match values in DID column from the first dataset
+  match <- cdata_DID[cdata_DID %in% train_mdata$DID]
+
+  # View matching columns
+  train_cdata <- cdata %>%
+    select(match)
+  
+  test_cdata <- cdata %>%
+    select(-match)
+
+  # DESeq2
+  dds <- DESeqDataSetFromMatrix(countData = train_cdata,
+                              colData = train_mdata,
+                              design = ~ Group)
+  dds <- DESeq(dds)
+  
+  # View result
+  res <- results(dds)
+  data.frame(res)
+  
+  # Extract the top 1000 features
+  # Subset the dataframe to include only rows where baseMean >= 100
+res_filtered <- res[res$baseMean >= 100, ]
+
+# Check if the filtered dataframe is not empty
+  if (nrow(res_filtered) > 0) {
+    # Extract padj and calculate rank
+    padj <- res_filtered[, 6]
+    rankpadj <- rank(-padj, na.last = "keep", ties.method = "average")
+    
+    # Add RankPAdj to the dataframe
+    res_filtered$RankPAdj <- rankpadj
+    
+    # Order by RankPAdj and select top 1000 features
+    orderP <- res_filtered[order(-res_filtered$RankPAdj), ]
+    fea_select <- head(orderP, 1000)
+  } else {
+    # Handle case where no rows meet the condition
+    fea_select <- NULL
+    message("No rows with baseMean >= 100")
+  }
+  
+  fea <- data.frame(rownames(fea_select))
+  colnames(fea) <- "Feature"
+  
+  # Reshape Train Set
+  train_cdata$Feature <- rownames(train_cdata)
+  fea_cnt_train <- left_join(fea, train_cdata, by = "Feature")
+  train_ana <- data.frame(t(fea_cnt_train))
+  colnames(train_ana) <- train_ana[1,]
+  train_ana <- train_ana[-1,]
+  train_ana$DID <- rownames(train_ana)
+  train_ana <- train_ana[, c(ncol(train_ana), 1:(ncol(train_ana)-1))]
+  train_ana <- left_join(train_ana, mdata, by = "DID")
+  train_ana <- train_ana[, c(ncol(train_ana), 1:(ncol(train_ana)-1))]
+  train_ana <- train_ana[, -2]
+  cols_train <- setdiff(names(train_ana), "Group")
+  train_ana[cols_train] <- lapply(train_ana[cols_train], function(x) {
+    if (is.factor(x)) {
+      x <- as.character(x)
+    }
+    as.numeric(x)
+  })
+
+
+  # Reshape Test Set
+  test_cdata$Feature <- rownames(test_cdata)
+  fea_cnt_test <- left_join(fea, test_cdata, by = "Feature")
+  test_ana <- data.frame(t(fea_cnt_test))
+  colnames(test_ana) <- test_ana[1,]
+  test_ana <- test_ana[-1,]
+  test_ana$DID <- rownames(test_ana)
+  test_ana <- test_ana[, c(ncol(test_ana), 1:(ncol(test_ana)-1))]
+  test_ana <- left_join(test_ana, mdata, by = "DID")
+  test_ana <- test_ana[, c(ncol(test_ana), 1:(ncol(test_ana)-1))]
+  test_ana <- test_ana[, -2]
+  cols_test <- setdiff(names(test_ana), "Group")
+  test_ana[cols_test] <- lapply(test_ana[cols_test], function(x) {
+    if (is.factor(x)) {
+      x <- as.character(x)
+    }
+    as.numeric(x)
+  })
+
+  # Run RF model
+  rf_4 <- randomForest(as.factor(Group) ~ ., data = train_ana, importance = TRUE)
+  predictions_4 <- predict(rf_4, newdata = test_ana)
+  predictions_train_4 <- predict(rf_4, newdata = train_ana)
+  
+  # Print the model summary
+  print(rf_4)
+```
+
+
+```{r looptest}
+# Evaluate the accuracy
+  
+  # Test Dataset
+  confusion_matrix_4 <- table(predictions_4, test_ana$Group)
+  
+  # Train Dataset
+  confusion_matrix_train_4 <- table(predictions_train_4, train_ana$Group)
+  
+  # Print Test Dataset Accuracy
+  accuracy_4 <- sum(diag(confusion_matrix_4)) / sum(confusion_matrix_4)
+  print(paste("Accuracy with test dataset:", round(accuracy_4 * 100, 2), "%"))
+  
+  # Print Train Dataset Accuracy
+  accuracy_train_4 <- sum(diag(confusion_matrix_train_4)) / sum(confusion_matrix_train_4)
+  print(paste("Accuracy with train dataset:", round(accuracy_train_4 * 100, 2), "%"))
+  
+  # Get variable importance
+  importance_df_4 <- importance(rf_4)
+  
+  # Sort variables by importance
+  sorted_accuracy_4 <- importance_df_4[order(-importance_df_4[, "MeanDecreaseAccuracy"]), ]
+  
+  # Plot variable importance (high to low)
+  varImpPlot(rf_4, 
+             sort = TRUE, 
+             n.var = min(200, nrow(sorted_accuracy_4)),
+             main = "RF Model for Fold 3")
+  
+  # Sorted by decreasing Accuracy
+  sorted_accuracy_4 <- data.frame(sorted_accuracy_4)
+  
+```
+
+```{r}
+sorted_accuracy_4
+# Select the top variables (e.g., top 5)
+top_vars_4 <- head(rownames(sorted_accuracy_4), 159)
+print("Top Variables to Retain:")
+print(top_vars_4)
+```
+
+
+### Appendix (loop breakdown 5)
+
+```{r looptest}
+test_index <- which(folds == 5, arr.ind = TRUE)  # Get the indices for the test set
+  train_mdata <- mdata[-test_index, ]  # Training set: all rows except the test set
+  test_mdata  <- mdata[test_index, ] # Test set: only rows in the current fold
+  
+  head(train_mdata)
+    
+  cdata_DID <- colnames(cdata)
+
+  # Find the columns in second dataset that match values in DID column from the first dataset
+  match <- cdata_DID[cdata_DID %in% train_mdata$DID]
+
+  # View matching columns
+  train_cdata <- cdata %>%
+    select(match)
+  
+  test_cdata <- cdata %>%
+    select(-match)
+
+  # DESeq2
+  dds <- DESeqDataSetFromMatrix(countData = train_cdata,
+                              colData = train_mdata,
+                              design = ~ Group)
+  dds <- DESeq(dds)
+  
+  # View result
+  res <- results(dds)
+  data.frame(res)
+  
+  # Extract the top 1000 features
+  # Subset the dataframe to include only rows where baseMean >= 100
+res_filtered <- res[res$baseMean >= 100, ]
+
+# Check if the filtered dataframe is not empty
+  if (nrow(res_filtered) > 0) {
+    # Extract padj and calculate rank
+    padj <- res_filtered[, 6]
+    rankpadj <- rank(-padj, na.last = "keep", ties.method = "average")
+    
+    # Add RankPAdj to the dataframe
+    res_filtered$RankPAdj <- rankpadj
+    
+    # Order by RankPAdj and select top 1000 features
+    orderP <- res_filtered[order(-res_filtered$RankPAdj), ]
+    fea_select <- head(orderP, 1000)
+  } else {
+    # Handle case where no rows meet the condition
+    fea_select <- NULL
+    message("No rows with baseMean >= 100")
+  }
+  
+  fea <- data.frame(rownames(fea_select))
+  colnames(fea) <- "Feature"
+  
+  # Reshape Train Set
+  train_cdata$Feature <- rownames(train_cdata)
+  fea_cnt_train <- left_join(fea, train_cdata, by = "Feature")
+  train_ana <- data.frame(t(fea_cnt_train))
+  colnames(train_ana) <- train_ana[1,]
+  train_ana <- train_ana[-1,]
+  train_ana$DID <- rownames(train_ana)
+  train_ana <- train_ana[, c(ncol(train_ana), 1:(ncol(train_ana)-1))]
+  train_ana <- left_join(train_ana, mdata, by = "DID")
+  train_ana <- train_ana[, c(ncol(train_ana), 1:(ncol(train_ana)-1))]
+  train_ana <- train_ana[, -2]
+  cols_train <- setdiff(names(train_ana), "Group")
+  train_ana[cols_train] <- lapply(train_ana[cols_train], function(x) {
+    if (is.factor(x)) {
+      x <- as.character(x)
+    }
+    as.numeric(x)
+  })
+
+
+  # Reshape Test Set
+  test_cdata$Feature <- rownames(test_cdata)
+  fea_cnt_test <- left_join(fea, test_cdata, by = "Feature")
+  test_ana <- data.frame(t(fea_cnt_test))
+  colnames(test_ana) <- test_ana[1,]
+  test_ana <- test_ana[-1,]
+  test_ana$DID <- rownames(test_ana)
+  test_ana <- test_ana[, c(ncol(test_ana), 1:(ncol(test_ana)-1))]
+  test_ana <- left_join(test_ana, mdata, by = "DID")
+  test_ana <- test_ana[, c(ncol(test_ana), 1:(ncol(test_ana)-1))]
+  test_ana <- test_ana[, -2]
+  cols_test <- setdiff(names(test_ana), "Group")
+  test_ana[cols_test] <- lapply(test_ana[cols_test], function(x) {
+    if (is.factor(x)) {
+      x <- as.character(x)
+    }
+    as.numeric(x)
+  })
+
+  # Run RF model
+  rf_5 <- randomForest(as.factor(Group) ~ ., data = train_ana, importance = TRUE)
+  predictions_5 <- predict(rf_5, newdata = test_ana)
+  predictions_train_5 <- predict(rf_5, newdata = train_ana)
+  
+  # Print the model summary
+  print(rf_5)
+```
+
+
+```{r looptest}
+# Evaluate the accuracy
+  
+  # Test Dataset
+  confusion_matrix_5 <- table(predictions_5, test_ana$Group)
+  
+  # Train Dataset
+  confusion_matrix_train_5 <- table(predictions_train_5, train_ana$Group)
+  
+  # Print Test Dataset Accuracy
+  accuracy_5 <- sum(diag(confusion_matrix_5)) / sum(confusion_matrix_5)
+  print(paste("Accuracy with test dataset:", round(accuracy_5 * 100, 2), "%"))
+  
+  # Print Train Dataset Accuracy
+  accuracy_train_5 <- sum(diag(confusion_matrix_train_5)) / sum(confusion_matrix_train_5)
+  print(paste("Accuracy with train dataset:", round(accuracy_train_5 * 100, 2), "%"))
+  
+  # Get variable importance
+  importance_df_5 <- importance(rf_5)
+  
+  # Sort variables by importance
+  sorted_accuracy_5 <- importance_df_5[order(-importance_df_5[, "MeanDecreaseAccuracy"]), ]
+  
+  # Plot variable importance (high to low)
+  varImpPlot(rf_5, 
+             sort = TRUE, 
+             n.var = min(200, nrow(sorted_accuracy_5)),
+             main = "RF Model for Fold 5")
+  
+  # Sorted by decreasing Accuracy
+  sorted_accuracy_5 <- data.frame(sorted_accuracy_5)
+  
+```
+
+```{r}
+sorted_accuracy_5
+# Select the top variables (e.g., top 5)
+top_vars_5 <- head(rownames(sorted_accuracy_5), 149)
+print("Top Variables to Retain:")
+print(top_vars_5)
+```
+### Find most overlapped genes
+
+```{r}
+combined_vars <- c(top_vars_1, top_vars_2, top_vars_3, top_vars_4, top_vars_5)
+
+# Split each string into words
+word_list <- strsplit(combined_vars, " ")
+
+# Flatten the list into a single vector of words
+all_words <- unlist(word_list)
+
+# Calculate the frequency of each word
+word_freq <- table(all_words)
+
+# Print the word frequencies
+vars <- data.frame(word_freq)
+
+order_vars <- vars[order(-vars[, "Freq"]), ]
+order_vars
+
+write.table(order_vars, "/Users/sherrywang/Desktop/Research/Furey/10_4_Var_RF.csv", sep = "\t", row.names = F)
+```
+
