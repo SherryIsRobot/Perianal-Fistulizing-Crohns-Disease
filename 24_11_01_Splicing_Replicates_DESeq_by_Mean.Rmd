@@ -1,0 +1,137 @@
+---
+title: "24_11_01_Splicing_Replicates_DESeq_by_Mean"
+author: "Sherry"
+date: "2024-11-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(DESeq2)
+library(openxlsx)
+```
+
+#### Import Dataset
+
+```{r Dataset}
+spl_eff <- read.delim("/Users/sherrywang/Desktop/Research/Calabrese/RNAseq_data/Infiled/24_10_18_Ori_Spl_Eff.tsv", sep = "\t", header = T)
+spl_eff
+```
+
+
+```{r}
+spl_eff$mean1 <- rowMeans(spl_eff[, seq(2, 89, by = 4)], na.rm = TRUE)
+spl_eff$mean2 <- rowMeans(spl_eff[, seq(3, 89, by = 4)], na.rm = TRUE)
+spl_eff$mean3 <- rowMeans(spl_eff[, seq(4, 89, by = 4)], na.rm = TRUE)
+spl_eff$mean4 <- rowMeans(spl_eff[, seq(5, 89, by = 4)], na.rm = TRUE)
+
+spl_eff
+```
+
+#### Subsetting the Dataset
+
+```{r}
+grp_ind <- c("Group", rep(1:23, each = 4))
+spl_eff_ind <- rbind(grp_ind, spl_eff)
+
+Ensembl_Gene_ID <- spl_eff_ind[, 1]
+
+compare_df <- cbind(Ensembl_Gene_ID, spl_eff_ind[, which(spl_eff_ind[1, ] == i)], spl_eff_ind[, which(spl_eff_ind[1, ] == 23)])
+
+result <- list()
+
+for (i in 1:22){
+  compare_df <- cbind(Ensembl_Gene_ID, spl_eff_ind[, which(spl_eff_ind[1, ] == i)], spl_eff_ind[, which(spl_eff_ind[1, ] == 23)])
+  compare_df <- compare_df %>%
+    mutate(across(2:9, as.numeric))
+  
+  process_NAs <- function(df) {
+    group_size <- 4
+    n_groups <- (ncol(df) - 1) / group_size  # Adjust for the first column (non-numeric)
+    
+    # Retain the first column (observation names) and work with the rest of the data
+    first_col <- df[, 1, drop = FALSE]
+    data <- df[, -1]  # Exclude the first column for calculations
+    
+    # Modify the rows and keep the modified ones
+    data_modified <- t(apply(data, 1, function(row) {
+      for (j in 1:n_groups) {
+        # Get the columns for the current group
+        group_columns <- ((j - 1) * group_size + 1):(j * group_size)
+        group_values <- row[group_columns]
+        
+        # Count the number of NAs in the group
+        num_NA <- sum(is.na(group_values))
+        
+        # If the group has 1 or 2 NAs, replace them with the mean of non-missing values
+        if (num_NA > 0 && num_NA <= 2) {
+          group_mean <- mean(group_values, na.rm = TRUE)
+          row[group_columns][is.na(row[group_columns])] <- group_mean
+        } else if (num_NA >= 3) {
+          # If the group has more than 3 NAs, return a row of NAs to be excluded later
+          return(rep(NA, length(row)))
+        }
+      }
+      return(row)  # Return the modified row
+    }))
+    
+    # Filter out rows with NA (i.e., rows excluded based on your criteria)
+    data_cleaned <- data_modified[complete.cases(data_modified), ]
+    
+    # Reattach the first column (observation names) to the cleaned data frame
+    df_cleaned <- cbind(first_col[complete.cases(data_modified), , drop = FALSE], data_cleaned)
+    
+    # Set the column names to match the original dataframe
+    colnames(df_cleaned) <- colnames(df)
+  
+    return(df_cleaned)
+  }
+  
+  # Apply the function to your data frame
+  compare_cl <- process_NAs(compare_df)
+  
+  # Round columns 2 to 9 in 'compare_cl' to 2 decimal places and scale by 100
+  compare_rnd <- round(compare_cl[2:nrow(compare_cl), 2:9], digits = 2) * 100
+  compare_rnd <- compare_rnd %>%
+    mutate_all(as.integer)
+  
+  rownames(compare_rnd) <- compare_cl$Ensembl_Gene_ID[2:nrow(compare_cl)]
+  
+  mdata <- data.frame(colnames(compare_rnd))
+  mdata <- data.frame(mdata[1:8, ])
+  mdata$Tissue <- as.factor(rep(1:2, each = 4))
+  colnames(mdata) <- c("Sample", "Tissue")
+  
+  dds <- DESeqDataSetFromMatrix(countData = compare_rnd[],
+                                colData = mdata,
+                                design = ~ Tissue)
+  dds <- DESeq(dds)
+  
+  result_table <- data.frame(results(dds))
+  
+  deseq_order <- data.frame(result_table[order(result_table$padj), ])
+  
+  result[[i]] <- deseq_order
+}
+```
+# Concatenate the datasets
+
+```{r}
+result
+
+# Create a new workbook
+wb <- createWorkbook()
+
+# Create separate sheets
+names(result) <- paste0("Sheet", 1:22)
+
+# Add each dataset as a new sheet in the workbook
+for (sheet_name in names(result)) {
+  addWorksheet(wb, sheet_name)
+  writeData(wb, sheet_name, result[[sheet_name]], rowNames = TRUE, colNames = TRUE)
+}
+
+# Save the workbook to a file
+saveWorkbook(wb, "/Users/sherrywang/Desktop/Research/Calabrese/RNAseq_data/Infiled/24_11_07_DESeq2_combined.xlsx", overwrite = TRUE)
+```
