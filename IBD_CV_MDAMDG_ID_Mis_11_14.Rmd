@@ -1,0 +1,276 @@
+---
+title: "IBD_CV_MDAMDG_ID_Mis_11_14"
+author: "Sherry"
+date: "2024-11-14"
+output: html_document
+---
+
+````{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(randomForest)
+library(caret)
+library(DESeq2)
+library(ggplot2)
+```
+
+### Import the dataset
+
+```{r import}
+cnt <- read.delim("/Users/sherrywang/Desktop/Research/Furey/AnalysisTable/RUVg_k10_normalized_counts.tsv", header=T, check.names = FALSE)
+head(cnt)
+met <- read.delim("/Users/sherrywang/Desktop/Research/Furey/AnalysisTable/plexus_atac_metadata_03112024.tsv", header=T)
+head(met)
+```
+
+### Reshape the dataset
+
+```{r clean}
+# Rename the columns and reset the data type
+mdata <- met %>%
+  select(DEIDENTIFIED_MASTER_PATIENT_ID, Group) %>%
+  mutate(DID = as.factor(DEIDENTIFIED_MASTER_PATIENT_ID)) %>%  
+  select(-DEIDENTIFIED_MASTER_PATIENT_ID)  
+
+mdata$Group <- as.factor(gsub("[^[:alnum:]_.]", "_", mdata$Group))
+
+# Adding row name
+rownames(cnt) <- cnt[, 1]
+cdata <- cnt[, -1]
+
+cnt_DID_COUNT <- data.frame(t(cdata))
+cnt_DID_COUNT
+
+# Remove the first row if it was used as column names
+cnt_DID_COUNT$DID <- rownames(cnt_DID_COUNT)
+```
+
+### Repeat loops for identifying consistently misclassified individuals
+
+```{r loop}
+comb_accuracy <- list()
+for (k in 1:2) {
+ set.seed(k)  # For reproducibility
+
+  # Total number of individuals
+  n <- nrow(met)
+  
+  # Generate fold indices
+  folds <- cut(sample(1:n), breaks = 5, labels = FALSE)
+  
+  # View the folds
+  folds
+  
+  # Add the folds to the complete dataset
+  # complete$folds <- folds
+  
+  # Add the folds to metadata and count data
+  mdata$folds <- folds
+  head(mdata)
+  
+  # Cross_val <- function(mdata, cdata) {
+  results <- list()
+  
+  # Perform 5-fold cross-validation
+  for (i in 1:5) {
+    test_index <- which(mdata$folds == i, arr.ind = TRUE)  # Get the indices for the test set
+    train_mdata <- mdata[-test_index, ]  # Training set: all rows except the test set
+    test_mdata  <- mdata[test_index, ] # Test set: only rows in the current fold
+      
+    cdata_DID <- colnames(cdata)
+  
+    # Find the columns in second dataset that match values in DID column from the first dataset
+    match <- cdata_DID[cdata_DID %in% train_mdata$DID]
+    
+    # Select columns based on 'match'
+    train_cdata <- cdata %>%
+      select(all_of(match))
+  
+    # Select columns NOT in 'match'
+    test_cdata <- cdata %>%
+      select(-all_of(match))
+  
+    # DESeq2
+    dds <- DESeqDataSetFromMatrix(countData = train_cdata,
+                                colData = train_mdata,
+                                design = ~ Group)
+    dds <- DESeq(dds)
+    
+    # View result
+    res <- results(dds)
+    
+    # Extract the top 1000 features
+    # Subset the dataframe to include only rows where baseMean >= 100
+  res_filtered <- res[res$baseMean >= 100, ]
+  
+  # Check if the filtered dataframe is not empty
+    if (nrow(res_filtered) > 0) {
+      # Extract padj and calculate rank
+      padj <- res_filtered[, 6]
+      rankpadj <- rank(-padj, na.last = "keep", ties.method = "average")
+      
+      # Add RankPAdj to the dataframe
+      res_filtered$RankPAdj <- rankpadj
+      
+      # Order by RankPAdj and select top 1000 features
+      orderP <- res_filtered[order(-res_filtered$RankPAdj), ]
+      fea_select <- head(orderP, 1000)
+    } else {
+      # Handle case where no rows meet the condition
+      fea_select <- NULL
+      message("No rows with baseMean >= 100")
+    }
+    
+    fea <- data.frame(rownames(fea_select))
+    colnames(fea) <- "Feature"
+    
+    # Reshape Train Set
+    train_cdata$Feature <- rownames(train_cdata)
+    fea_cnt_train <- left_join(fea, train_cdata, by = "Feature")
+    train_ana <- data.frame(t(fea_cnt_train))
+    colnames(train_ana) <- train_ana[1,]
+    train_ana <- train_ana[-1,]
+    train_ana$DID <- rownames(train_ana)
+    train_ana <- train_ana[, c(ncol(train_ana), 1:(ncol(train_ana)-1))]
+    train_ana <- left_join(train_ana, mdata, by = "DID")
+    train_ana <- train_ana[, c(ncol(train_ana), 1:(ncol(train_ana)-1))]
+    train_ana <- train_ana[, -2]
+    cols_train <- setdiff(names(train_ana), "Group")
+    train_ana[cols_train] <- lapply(train_ana[cols_train], function(x) {
+      if (is.factor(x)) {
+        x <- as.character(x)
+      }
+      as.numeric(x)
+    })
+  
+  
+    # Reshape Test Set
+    test_cdata$Feature <- rownames(test_cdata)
+    fea_cnt_test <- left_join(fea, test_cdata, by = "Feature")
+    test_ana <- data.frame(t(fea_cnt_test))
+    colnames(test_ana) <- test_ana[1,]
+    test_ana <- test_ana[-1,]
+    test_ana$DID <- rownames(test_ana)
+    test_ana <- test_ana[, c(ncol(test_ana), 1:(ncol(test_ana)-1))]
+    test_ana <- left_join(test_ana, mdata, by = "DID")
+    test_ana <- test_ana[, c(ncol(test_ana), 1:(ncol(test_ana)-1))]
+    test_ana <- test_ana[, -2]
+    cols_test <- setdiff(names(test_ana), "Group")
+    test_ana[cols_test] <- lapply(test_ana[cols_test], function(x) {
+      if (is.factor(x)) {
+        x <- as.character(x)
+      }
+      as.numeric(x)
+    })
+  
+    # Run Random Forest model
+    rf <- randomForest(as.factor(Group) ~ ., data = train_ana, importance = TRUE)
+    
+    # Predictions
+    predictions_train <- predict(rf, newdata = train_ana)
+    predictions <- predict(rf, newdata = test_ana)
+    
+    # Model Summary
+    cat(paste0("\n\nResult for Loop ", i, "\n"))
+    print(rf)
+    
+    # Misclassified Individuals
+    misclassified <- test_mdata[test_ana$Group != predictions, ]
+    cat("\nMisclassified Individuals:\n")
+    print(misclassified)
+    
+    # Accuracy for Train Dataset
+    confusion_matrix_train <- table(predictions_train, train_ana$Group)
+    accuracy_train <- sum(diag(confusion_matrix_train)) / sum(confusion_matrix_train)
+    cat(paste("Accuracy with Train Dataset:", round(accuracy_train * 100, 2), "%\n"))
+    
+    # Accuracy for Test Dataset
+    confusion_matrix <- table(predictions, test_ana$Group)
+    accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+    cat(paste("Accuracy with Test Dataset:", round(accuracy * 100, 2), "%\n"))
+    
+    # Variable Importance
+    importance_df <- data.frame(importance(rf))
+    importance_df$RankAccuracy <- rank(importance_df$MeanDecreaseAccuracy, na.last = F, ties.method = "average")
+    importance_df$RankGini <- rank(importance_df$MeanDecreaseGini, na.last = F, ties.method = "average")
+    importance_df$Score <- importance_df$RankAccuracy + importance_df$RankGini
+    importance_df <- importance_df[order(-importance_df$Score), ]
+    
+    cat("\nVariable Importance:\n")
+    print(importance_df)
+    
+    # Plot Variable Importance
+    varImpPlot(rf, sort = TRUE, n.var = min(500, nrow(importance_df)), main = paste("Random Forest Variable Importance (Fold", i, ")"))
+    
+    # Plot Score
+    plot(importance_df$Score, main = paste("Importance Score Plot (Fold", i, ")"), ylab = "Score", xlab = "Features", type = "b")
+    
+    # Store results in list for further analysis if needed
+    results[[i]] <- list(
+      model_summary = rf,
+      misclassified = misclassified,
+      accuracy_train = accuracy_train,
+      accuracy_test = accuracy,
+      importance_df = importance_df
+    )
+  } 
+  
+  # Store results in a named list for each fold, as intended
+  result_name <- paste0("results_", k)
+  assign(result_name, results)
+  
+  # Initialize an empty list to collect misclassified samples
+  mis <- list()
+  for (j in 1:5) {
+    mis[[j]] <- get(result_name)[[j]]$misclassified
+  }
+  
+  # Combine misclassified samples into a single data frame
+  combined_mis <- do.call(rbind, mis)
+  
+  # Assign the combined misclassified samples to a new variable
+  mis_name <- paste0("mis_", k)
+  assign(mis_name, combined_mis)
+  
+  comb_accuracy[[k]] <- (results[[1]][[4]]+results[[2]][[4]]+results[[3]][[4]]+results[[4]][[4]]+results[[5]][[4]])/5
+
+}
+```
+
+```{r}
+# Initialize an empty data frame to store all DID values and their counts
+all_did_counts <- data.frame(DID = character(), Count = integer(), stringsAsFactors = FALSE)
+
+# Loop through each dataset (assuming there are 2 datasets; adjust as needed)
+for (i in 1:10) {
+  # Construct the dataset name dynamically
+  dataset_name <- paste0("mis_", i)
+  
+  # Access the dataset using get()
+  dataset <- get(dataset_name)
+  
+  # Count occurrences of each DID in the current dataset
+  id_counts <- table(dataset$DID)
+  
+  # Convert to data frame and add to all_did_counts
+  id_counts_df <- data.frame(DID = names(id_counts), Count = as.numeric(id_counts))
+  all_did_counts <- rbind(all_did_counts, id_counts_df)
+}
+
+# Aggregate counts for each DID across all datasets
+library(dplyr)
+consolidated_did_counts <- all_did_counts %>%
+  group_by(DID) %>%
+  summarise(Total_Count = sum(Count)) %>%
+  arrange(desc(Total_Count))
+
+# Display the consolidated dataset
+print(consolidated_did_counts)
+write.csv(consolidated_did_counts, "/Users/sherrywang/Desktop/Research/Furey/Misclassified_11_22.csv")
+
+```
+
+```{r}
+comb_accuracy
+```
+
